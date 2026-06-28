@@ -12,7 +12,7 @@ every build.
 steps:
   - label: ":node: changelog diff"
     plugins:
-      - docker-node-diff#v1.0.0:
+      - zbrydon/docker-node-diff#v1.0.0:
           branches:
             - renovate-docker-images
             - renovate/docker-digests
