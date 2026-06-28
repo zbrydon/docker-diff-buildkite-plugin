@@ -1,4 +1,4 @@
-name: Docker Node Diff
+name: Docker Diff
 description: On a Renovate Docker-digest PR, post the Node.js changelogs between the old and new runtime versions into the PR description.
 author: https://github.com/zbrydon
 requirements:

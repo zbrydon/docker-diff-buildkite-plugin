@@ -1,4 +1,4 @@
-# Docker Node Diff Buildkite Plugin
+# Docker Diff Buildkite Plugin
 
 On a [Renovate](https://docs.renovatebot.com/) Docker-digest-update pull request, this
 plugin scans the before/after images with [Syft](https://github.com/anchore/syft) and
@@ -12,7 +12,7 @@ for every release in between**. The block is refreshed in place on every build.
 steps:
   - label: ":node: changelog diff"
     plugins:
-      - zbrydon/docker-node-diff#v1.0.0:
+      - zbrydon/docker-diff#v1.0.0:
           branches:
             - renovate-docker-images
             - renovate/docker-digests

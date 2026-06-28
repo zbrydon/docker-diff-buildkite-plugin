@@ -13,8 +13,8 @@ source "${HOOK_DIR}/../lib/shared.bash"
 
 SYFT_VERSION="$(plugin_read SYFT_VERSION "v1.46.0")"
 
-__dnd_oldopts="$(set +o)"
-__dnd_oldtrap="$(trap -p EXIT)"
+__dd_oldopts="$(set +o)"
+__dd_oldtrap="$(trap -p EXIT)"
 set -euo pipefail
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -23,7 +23,7 @@ case "$arch" in
   x86_64 | amd64) arch="amd64" ;;
   aarch64 | arm64) arch="arm64" ;;
   *)
-    echo ":docker: docker-node-diff: unsupported architecture: ${arch}" >&2
+    echo ":docker: docker-diff: unsupported architecture: ${arch}" >&2
     exit 1
     ;;
 esac
@@ -41,25 +41,25 @@ dl() {
   curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"
 }
 
-echo ":docker: docker-node-diff: installing syft ${tag} for ${os}/${arch}" >&2
+echo ":docker: docker-diff: installing syft ${tag} for ${os}/${arch}" >&2
 
 if ! dl "${base_url}/${asset}" "${workdir}/${asset}"; then
-  echo "docker-node-diff: failed to download ${asset}" >&2
+  echo "docker-diff: failed to download ${asset}" >&2
   exit 1
 fi
 if ! dl "${base_url}/${checksums}" "${workdir}/${checksums}"; then
-  echo "docker-node-diff: failed to download ${checksums}" >&2
+  echo "docker-diff: failed to download ${checksums}" >&2
   exit 1
 fi
 
 expected="$(awk -v f="${asset}" '$2 == f {print $1}' "${workdir}/${checksums}")"
 if [ -z "${expected}" ]; then
-  echo "docker-node-diff: no checksum entry for ${asset}" >&2
+  echo "docker-diff: no checksum entry for ${asset}" >&2
   exit 1
 fi
 actual="$(sha256_file "${workdir}/${asset}")"
 if [ "${expected}" != "${actual}" ]; then
-  echo "docker-node-diff: checksum mismatch for ${asset}" >&2
+  echo "docker-diff: checksum mismatch for ${asset}" >&2
   echo "  expected: ${expected}" >&2
   echo "  actual:   ${actual}" >&2
   exit 1
@@ -73,12 +73,12 @@ install -m 0755 "${workdir}/syft" "${install_dir}/syft"
 # EXIT trap before falling through so nothing leaks into the bootstrap.
 rm -rf "${workdir}"
 trap - EXIT
-[ -n "${__dnd_oldtrap}" ] && eval "${__dnd_oldtrap}"
-eval "${__dnd_oldopts}"
-unset __dnd_oldopts __dnd_oldtrap
+[ -n "${__dd_oldtrap}" ] && eval "${__dd_oldtrap}"
+eval "${__dd_oldopts}"
+unset __dd_oldopts __dd_oldtrap
 
 export PATH="${install_dir}:${PATH}"
-echo "docker-node-diff: syft ready (${install_dir}/syft)" >&2
+echo "docker-diff: syft ready (${install_dir}/syft)" >&2
 
 # Sourced hook: drop our working vars and helper functions so generic names
 # (os/arch/workdir/...) and lib/shared.bash's functions do not leak into (or

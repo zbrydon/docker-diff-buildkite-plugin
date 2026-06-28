@@ -123,7 +123,7 @@ run_hook() {
   printf 'Original body.\n' >"${PR_BODY_FILE}"
   run_hook 42
   [ "$status" -eq 0 ]
-  grep -q "docker-node-diff:start" "${PR_BODY_FILE}"
+  grep -q "docker-diff:start" "${PR_BODY_FILE}"
   grep -q 'Node.js `20.9.0` → `20.11.0`' "${PR_BODY_FILE}"
   grep -q "v20.11.0</summary>" "${PR_BODY_FILE}"
   grep -q "v20.10.0</summary>" "${PR_BODY_FILE}"
@@ -139,7 +139,7 @@ run_hook() {
   printf 'Original body.\n' >"${PR_BODY_FILE}"
   run_hook 42
   run_hook 42
-  [ "$(grep -c "docker-node-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
+  [ "$(grep -c "docker-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
 }
 
 @test "replaces a large existing block in place (no SIGPIPE append)" {
@@ -147,14 +147,14 @@ run_hook() {
   # SIGPIPE (status 141) and appended a second block instead of replacing.
   {
     echo "Original body."
-    echo "<!-- docker-node-diff:start -->"
+    echo "<!-- docker-diff:start -->"
     head -c 70000 </dev/zero | tr '\0' x
     echo
-    echo "<!-- docker-node-diff:end -->"
+    echo "<!-- docker-diff:end -->"
   } >"${PR_BODY_FILE}"
   run_hook 42
   [ "$status" -eq 0 ]
-  [ "$(grep -c "docker-node-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
+  [ "$(grep -c "docker-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
 }
 
 @test "no node change still lists the package diff and clears stale changelogs" {
@@ -176,7 +176,7 @@ run_hook() {
   printf 'Original body.\n' >"${PR_BODY_FILE}"
   run_hook 42
   [ "$status" -eq 0 ]
-  grep -q "docker-node-diff:start" "${PR_BODY_FILE}"
+  grep -q "docker-diff:start" "${PR_BODY_FILE}"
   grep -q "Docker image changes" "${PR_BODY_FILE}"
   grep -q "libssl3t64" "${PR_BODY_FILE}"
   grep -q "no Node.js runtime change" "${PR_BODY_FILE}"
@@ -212,7 +212,7 @@ run_hook() {
   GH_PR_LIST_NUMBER="42" run_hook false
   [ "$status" -eq 0 ]
   grep -q "gh pr list" "${GH_LOG}"
-  grep -q "docker-node-diff:start" "${PR_BODY_FILE}"
+  grep -q "docker-diff:start" "${PR_BODY_FILE}"
   grep -q "Original body." "${PR_BODY_FILE}"
 }
 

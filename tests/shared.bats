@@ -59,27 +59,27 @@ setup() {
 }
 
 @test "plugin_read falls back to default" {
-  unset BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_SYFT_VERSION || true
+  unset BUILDKITE_PLUGIN_DOCKER_DIFF_SYFT_VERSION || true
   run plugin_read SYFT_VERSION "v1.46.0"
   [ "$output" = "v1.46.0" ]
 }
 
 @test "plugin_read reads the env var" {
-  export BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_SYFT_VERSION="v9.9.9"
+  export BUILDKITE_PLUGIN_DOCKER_DIFF_SYFT_VERSION="v9.9.9"
   run plugin_read SYFT_VERSION "v1.46.0"
   [ "$output" = "v9.9.9" ]
 }
 
 @test "read_list_property collects an array" {
-  export BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_BRANCHES_0="a"
-  export BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_BRANCHES_1="b"
+  export BUILDKITE_PLUGIN_DOCKER_DIFF_BRANCHES_0="a"
+  export BUILDKITE_PLUGIN_DOCKER_DIFF_BRANCHES_1="b"
   read_list_property BRANCHES
   [ "${result[0]}" = "a" ]
   [ "${result[1]}" = "b" ]
 }
 
 @test "read_list_property collects a scalar" {
-  export BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_BRANCHES="main"
+  export BUILDKITE_PLUGIN_DOCKER_DIFF_BRANCHES="main"
   read_list_property BRANCHES
   [ "${result[0]}" = "main" ]
 }

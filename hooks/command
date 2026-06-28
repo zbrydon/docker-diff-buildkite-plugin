@@ -1,7 +1,6 @@
 #!/bin/bash
-# Core logic: on a Renovate Docker-digest diff, scan every bumped image with Syft
-# and post its package-level SBOM diff into the PR description. When an image's
-# Node.js runtime version changed, also post the Node.js changelogs in between.
+# Post a per-image SBOM diff (and Node.js changelogs when the runtime moved) into
+# the PR description for a Renovate Docker-digest bump.
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,20 +8,19 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HOOK_DIR}/../lib/shared.bash"
 
 MAX_RELEASES=20
-MARKER_START="<!-- docker-node-diff:start -->"
-MARKER_END="<!-- docker-node-diff:end -->"
+MARKER_START="<!-- docker-diff:start -->"
+MARKER_END="<!-- docker-diff:end -->"
 DIST_INDEX_URL="https://nodejs.org/dist/index.json"
 CHANGELOG_URL_BASE="https://raw.githubusercontent.com/nodejs/node/main/doc/changelogs"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
-log() { echo "docker-node-diff: $*" >&2; }
+log() { echo "docker-diff: $*" >&2; }
 
-# Scans an image with Syft into a normalized "type<TAB>name<TAB>version" list,
-# one package per line, sorted. Leaves an empty file if the scan fails.
 scan_packages() {
   local ref="$1" out="$2"
+  # Empty file on scan failure, so the caller still produces a diff.
   if ! syft scan "registry:${ref}" -q -o syft-json 2>/dev/null \
        | jq -r '.artifacts[] | [.type, .name, .version] | @tsv' \
        | sort -u >"$out"; then
@@ -30,8 +28,6 @@ scan_packages() {
   fi
 }
 
-# Reads the Node.js runtime version from a scan file, preferring the binary
-# artifact (the real runtime) over a generic "node" package entry.
 node_version_from() {
   awk -F'\t' '
     $2 == "node" { if ($1 == "binary") b = $3; else if (g == "") g = $3 }
@@ -39,15 +35,9 @@ node_version_from() {
   ' "$1"
 }
 
-# Markdown bullets describing how the package set changed from $1 (old scan) to
-# $2 (new scan): one line per added, removed, or version-changed package, sorted
-# by name. Packages are keyed by type+name so a version move is a single bump
-# rather than an add/remove pair.
 diff_packages() {
+  # awk emits a "name<TAB>bullet" key column; sort by name, then drop the key.
   awk -F'\t' '
-    # Registry/distro page for a package, or "" when we have no good target.
-    # node is matched by name (its artifact type is "binary") before the
-    # type-based cases so the runtime still gets a link.
     function pkg_url(type, name, ver) {
       if (name == "node")  return "https://nodejs.org/en/blog/release/v" ver
       if (type == "npm")   return "https://www.npmjs.com/package/" name "/v/" ver
@@ -55,7 +45,6 @@ diff_packages() {
       if (type == "apk")   return "https://pkgs.alpinelinux.org/packages?name=" name
       return ""
     }
-    # Package name as clickable inline code, or plain inline code when unlinked.
     function lnk(type, name, ver,   u) {
       u = pkg_url(type, name, ver)
       return u == "" ? "`" name "`" : "[`" name "`](" u ")"
@@ -80,7 +69,7 @@ fetch_dist_index() {
   fi
 }
 
-# Releases in the half-open range (before, after], newest first, capped at MAX_RELEASES.
+# Range is half-open (before, after]: excludes the current version, includes the target.
 releases_between() {
   local before="$1"
   local after="$2"
@@ -93,14 +82,12 @@ releases_between() {
     if version_gt "$v" "$before" && { [ "$v" = "$after" ] || version_gt "$after" "$v"; }; then
       out+=("$v")
     fi
-  done < <(jq -r '.[].version' "${WORKDIR}/index.json" | sed 's/^v//')
+  done < <(jq -r '.[].version | ltrimstr("v")' "${WORKDIR}/index.json")
 
   [ ${#out[@]} -eq 0 ] && return 0
   printf '%s\n' "${out[@]}" | sort -rV | head -n "${MAX_RELEASES}"
 }
 
-# Pulls one release's section out of its major-version changelog, or links to the
-# GitHub release tag when the section can't be found.
 changelog_section() {
   local version="$1"
   local major="${version%%.*}"
@@ -120,44 +107,177 @@ changelog_section() {
   ' "$file"
 }
 
-# Pairs each removed ref with an added ref by repo:tag first, then by repo, so a
-# digest bump still matches even when the tag changed in the same update.
+# Only the Renovate branch(es) carry the digest bumps; skip everything else.
+# (read_list_property fills the global `result`; see lib/shared.bash.)
+branch_allowed() {
+  local branch="${BUILDKITE_BRANCH:-}"
+  if [ -z "$branch" ]; then
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  fi
+
+  if ! read_list_property BRANCHES; then
+    result=("renovate-docker-images")
+  fi
+
+  local b
+  for b in "${result[@]}"; do
+    [ "$b" = "$branch" ] && return 0
+  done
+  log "branch '${branch}' not in allow-list; skipping"
+  return 1
+}
+
+# A fork PR's diff is attacker-controlled (the images we pull, the versions we
+# render), so callers refuse to scan it. The branch allow-list is not a trust
+# boundary: a fork can name its branch anything. Push builds are trusted.
+is_fork_pr() {
+  local pr="${BUILDKITE_PULL_REQUEST:-}"
+  case "$pr" in
+    '' | *[!0-9]*) return 1 ;; # not a PR build -> trusted internal build
+  esac
+  local src_repo="${BUILDKITE_PULL_REQUEST_REPO:-}"
+  local base_repo="${BUILDKITE_REPO:-}"
+  [ -n "$src_repo" ] && [ -n "$base_repo" ] \
+    && [ "$(repo_slug "$src_repo")" != "$(repo_slug "$base_repo")" ]
+}
+
+resolve_diff_base() {
+  local base="${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}"
+  if git rev-parse --verify -q "origin/${base}" >/dev/null; then
+    printf 'origin/%s' "$base"
+  elif git rev-parse --verify -q "${base}" >/dev/null; then
+    printf '%s' "$base"
+  else
+    printf 'HEAD~1'
+  fi
+}
+
+extract_refs() {
+  local diff="$1" removed="$2" added="$3"
+  local regex='[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-fA-F]{64}'
+  printf '%s\n' "$diff" | grep '^-' | grep -oE "$regex" >"$removed" || :
+  printf '%s\n' "$diff" | grep '^+' | grep -oE "$regex" >"$added" || :
+}
+
+# Greedy two-pass match: pair by repo:tag first, then by repo only, so a digest
+# bump still matches when the tag changed in the same update. Emits "before<TAB>after".
 pair_digests() {
-  local n_removed=${#removed_refs[@]}
-  local n_added=${#added_refs[@]}
-  local rtaken=() ataken=()
-  local i j pass key_r key_a
+  local rem=() add=() line
+  while IFS= read -r line; do [ -n "$line" ] && rem+=("$line"); done <"$1"
+  while IFS= read -r line; do [ -n "$line" ] && add+=("$line"); done <"$2"
 
-  for ((i = 0; i < n_removed; i++)); do rtaken[i]=0; done
-  for ((j = 0; j < n_added; j++)); do ataken[j]=0; done
-  pairs_before=()
-  pairs_after=()
-
-  for pass in 1 2; do
-    for ((i = 0; i < n_removed; i++)); do
-      [ "${rtaken[$i]}" = 1 ] && continue
-      if [ "$pass" = 1 ]; then
-        key_r="$(image_repo_tag "${removed_refs[$i]}")"
-      else
-        key_r="$(image_repo "${removed_refs[$i]}")"
-      fi
-      for ((j = 0; j < n_added; j++)); do
-        [ "${ataken[$j]}" = 1 ] && continue
-        if [ "$pass" = 1 ]; then
-          key_a="$(image_repo_tag "${added_refs[$j]}")"
-        else
-          key_a="$(image_repo "${added_refs[$j]}")"
-        fi
-        if [ "$key_r" = "$key_a" ]; then
-          pairs_before+=("${removed_refs[$i]}")
-          pairs_after+=("${added_refs[$j]}")
-          rtaken[i]=1
-          ataken[j]=1
+  local keyfn i j key_r
+  for keyfn in image_repo_tag image_repo; do
+    for ((i = 0; i < ${#rem[@]}; i++)); do
+      [ -z "${rem[i]}" ] && continue
+      key_r="$("$keyfn" "${rem[i]}")"
+      for ((j = 0; j < ${#add[@]}; j++)); do
+        [ -z "${add[j]}" ] && continue
+        if [ "$key_r" = "$("$keyfn" "${add[j]}")" ]; then
+          printf '%s\t%s\n' "${rem[i]}" "${add[j]}"
+          rem[i]=""
+          add[j]=""
           break
         fi
       done
     done
   done
+}
+
+render_pkgdiff() {
+  local pkgdiff="$1" n
+  if [ -z "$pkgdiff" ]; then
+    printf '_No package changes detected._\n\n'
+    return
+  fi
+  n="$(printf '%s\n' "$pkgdiff" | wc -l | tr -d ' ')"
+  printf '<details><summary>%s package change(s)</summary>\n\n' "$n"
+  printf '%s\n\n' "$pkgdiff"
+  printf '</details>\n\n'
+}
+
+render_changelogs() {
+  local bver="$1" aver="$2" releases v sec
+  releases="$(releases_between "$bver" "$aver")"
+  if [ -z "$releases" ]; then
+    log "no in-range Node.js releases for ${bver} -> ${aver}"
+    return
+  fi
+  printf '#### Node.js changelog\n\n'
+  while IFS= read -r v; do
+    [ -z "$v" ] && continue
+    sec="$(changelog_section "$v")"
+    printf '<details><summary>v%s</summary>\n\n%s\n\n</details>\n\n' "$v" "$sec"
+  done <<<"$releases"
+}
+
+# Returns success when the Node.js runtime version changed, so the caller can count it.
+process_pair() {
+  local bref="$1" aref="$2"
+  local repo bshort ashort oldpkgs newpkgs bver aver pkgdiff node_changed=1
+  repo="$(image_repo "$aref")"
+  bshort="$(short_digest "$bref")"
+  ashort="$(short_digest "$aref")"
+  log "checking ${repo} (${bshort} -> ${ashort})"
+
+  oldpkgs="$(mktemp "${WORKDIR}/old.XXXXXX")"
+  newpkgs="$(mktemp "${WORKDIR}/new.XXXXXX")"
+  scan_packages "$bref" "$oldpkgs"
+  scan_packages "$aref" "$newpkgs"
+
+  bver="$(node_version_from "$oldpkgs")"
+  aver="$(node_version_from "$newpkgs")"
+  if [ -n "$bver" ] && [ -n "$aver" ] \
+     && is_node_version "$bver" && is_node_version "$aver" \
+     && [ "$bver" != "$aver" ]; then
+    node_changed=0
+  fi
+
+  pkgdiff="$(diff_packages "$oldpkgs" "$newpkgs")"
+
+  # shellcheck disable=SC2016 # backticks are literal markdown, not command substitution
+  printf '### %s (`%s` → `%s`)\n\n' "$repo" "$bshort" "$ashort"
+  if [ "$node_changed" = 0 ]; then
+    # shellcheck disable=SC2016
+    printf 'Node.js `%s` → `%s`\n\n' "$bver" "$aver"
+  fi
+  render_pkgdiff "$pkgdiff"
+  if [ "$node_changed" = 0 ]; then
+    render_changelogs "$bver" "$aver"
+  fi
+
+  return "$node_changed"
+}
+
+# Echoes "<images_changed> <node_bumps>" on stdout. Dedups pairs so one image
+# pinned via several compose anchors is scanned and reported once.
+build_report() {
+  local report="$1" removed="$2" added="$3"
+  local bref aref nchanged=0 nnode=0
+  while IFS=$'\t' read -r bref aref; do
+    [ -z "$bref" ] && continue
+    if process_pair "$bref" "$aref" >>"$report"; then
+      nnode=$((nnode + 1))
+    fi
+    nchanged=$((nchanged + 1))
+  done < <(pair_digests "$removed" "$added" | awk '!seen[$0]++')
+
+  printf '%s %s\n' "$nchanged" "$nnode"
+}
+
+assemble_final() {
+  local nchanged="$1" nnode="$2" report="$3"
+  printf '## Docker image changes\n\n'
+  if [ "$nchanged" -le 0 ]; then
+    printf '_No Docker image changes detected in this update._\n'
+    return
+  fi
+  if [ "$nnode" -gt 0 ]; then
+    printf '%s Docker image(s) changed; %s bumped the Node.js runtime.\n\n' "$nchanged" "$nnode"
+  else
+    printf '%s Docker image(s) changed; no Node.js runtime change.\n\n' "$nchanged"
+  fi
+  cat "$report"
 }
 
 upsert_pr() {
@@ -184,9 +304,8 @@ upsert_pr() {
   local pr="${BUILDKITE_PULL_REQUEST:-}"
   case "$pr" in
     '' | *[!0-9]*)
-      # Buildkite only sets BUILDKITE_PULL_REQUEST to a number on PR-triggered
-      # builds; for branch-push builds it is "false". Fall back to looking up an
-      # open PR (including drafts) for the current branch.
+      # BUILDKITE_PULL_REQUEST is a number only on PR builds; on branch-push it is
+      # "false", so fall back to looking up an open PR for the current branch.
       local branch="${BUILDKITE_BRANCH:-}"
       if [ -z "$branch" ]; then
         log "not a pull request and no branch to resolve; skipping PR update"
@@ -234,172 +353,31 @@ upsert_pr() {
 }
 
 main() {
-  # Only run on the configured Renovate branch(es); other branches won't carry
-  # the digest bumps this plugin looks for.
-  local branch="${BUILDKITE_BRANCH:-}"
-  if [ -z "$branch" ]; then
-    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  fi
+  branch_allowed || exit 0
 
-  local result
-  if ! read_list_property BRANCHES; then
-    result=("renovate-docker-images")
-  fi
-  local allowed=0 b
-  for b in "${result[@]}"; do
-    if [ "$b" = "$branch" ]; then allowed=1; break; fi
-  done
-  if [ "$allowed" -ne 1 ]; then
-    log "branch '${branch}' not in allow-list; skipping"
+  if is_fork_pr; then
+    log "pull request from a fork (source repo != base repo); refusing to scan untrusted images; skipping"
     exit 0
   fi
 
-  # Refuse fork PRs: the diff (and thus the images we pull and the versions we
-  # render) is attacker-controlled when the PR source repo isn't the base repo.
-  # The branch allow-list alone is not a trust boundary -- a fork can name its
-  # branch anything. Only PR builds are gated; non-PR (push) builds on the
-  # renovate branch are the trusted internal case.
-  local pr="${BUILDKITE_PULL_REQUEST:-}"
-  case "$pr" in
-    '' | *[!0-9]*) ;; # not a PR build -> trusted internal build, no fork risk
-    *)
-      local src_repo="${BUILDKITE_PULL_REQUEST_REPO:-}"
-      local base_repo="${BUILDKITE_REPO:-}"
-      if [ -n "$src_repo" ] && [ -n "$base_repo" ] \
-         && [ "$(repo_slug "$src_repo")" != "$(repo_slug "$base_repo")" ]; then
-        log "pull request from a fork (source repo != base repo); refusing to scan untrusted images; skipping"
-        exit 0
-      fi
-      ;;
-  esac
-
-  # Diff against origin/<base>, falling back to a local <base>, then HEAD~1.
-  local base="${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}"
-  local diff_base
-  if git rev-parse --verify -q "origin/${base}" >/dev/null; then
-    diff_base="origin/${base}"
-  elif git rev-parse --verify -q "${base}" >/dev/null; then
-    diff_base="${base}"
-  else
-    diff_base="HEAD~1"
-  fi
-
-  local diff
+  local diff_base diff
+  diff_base="$(resolve_diff_base)"
   diff="$(git --no-pager diff "${diff_base}...HEAD" || true)"
 
-  # Collect @sha256 image refs from removed (-) and added (+) diff lines.
-  local regex='[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-fA-F]{64}'
-  removed_refs=()
-  added_refs=()
-  local line
-  while IFS= read -r line; do
-    [ -n "$line" ] && removed_refs+=("$line")
-  done < <(printf '%s\n' "$diff" | grep '^-' | grep -oE "$regex" || true)
-  while IFS= read -r line; do
-    [ -n "$line" ] && added_refs+=("$line")
-  done < <(printf '%s\n' "$diff" | grep '^+' | grep -oE "$regex" || true)
+  local removed added report
+  removed="$(mktemp "${WORKDIR}/removed.XXXXXX")"
+  added="$(mktemp "${WORKDIR}/added.XXXXXX")"
+  extract_refs "$diff" "$removed" "$added"
 
-  pair_digests
+  report="$(mktemp "${WORKDIR}/report.XXXXXX")"
+  local nchanged nnode
+  read -r nchanged nnode < <(build_report "$report" "$removed" "$added")
 
-  local report="${WORKDIR}/report.md"
-  : >"$report"
-  local nchanged_img=0 nnode=0
-  local npairs=${#pairs_before[@]}
-  local p bref aref bver aver v sec
-  local seen=()
-  for ((p = 0; p < npairs; p++)); do
-    bref="${pairs_before[$p]}"
-    aref="${pairs_after[$p]}"
+  local final block
+  final="$(mktemp "${WORKDIR}/final.XXXXXX")"
+  assemble_final "$nchanged" "$nnode" "$report" >"$final"
 
-    # Skip duplicate before->after pairs (e.g. one image pinned via several
-    # compose anchors) so each digest bump is scanned and reported once.
-    local sig="${bref}=>${aref}" s dup=0
-    for s in "${seen[@]}"; do [ "$s" = "$sig" ] && { dup=1; break; }; done
-    [ "$dup" = 1 ] && continue
-    seen+=("$sig")
-
-    local repo bshort ashort
-    repo="$(image_repo "$aref")"
-    bshort="$(short_digest "$bref")"
-    ashort="$(short_digest "$aref")"
-    log "checking ${repo} (${bshort} -> ${ashort})"
-
-    local oldpkgs="${WORKDIR}/old.${p}.tsv" newpkgs="${WORKDIR}/new.${p}.tsv"
-    scan_packages "$bref" "$oldpkgs"
-    scan_packages "$aref" "$newpkgs"
-
-    bver="$(node_version_from "$oldpkgs")"
-    aver="$(node_version_from "$newpkgs")"
-
-    local node_changed=0
-    if [ -n "$bver" ] && [ -n "$aver" ] \
-       && is_node_version "$bver" && is_node_version "$aver" \
-       && [ "$bver" != "$aver" ]; then
-      node_changed=1
-    fi
-
-    local pkgdiff
-    pkgdiff="$(diff_packages "$oldpkgs" "$newpkgs")"
-
-    nchanged_img=$((nchanged_img + 1))
-
-    # Every bumped image gets a section with its package diff; the Node.js
-    # version line and changelogs are added only when the runtime moved.
-    {
-      # shellcheck disable=SC2016 # backticks are literal markdown, not command substitution
-      printf '### %s (`%s` → `%s`)\n\n' "$repo" "$bshort" "$ashort"
-    } >>"$report"
-
-    if [ "$node_changed" = 1 ]; then
-      # shellcheck disable=SC2016
-      printf 'Node.js `%s` → `%s`\n\n' "$bver" "$aver" >>"$report"
-    fi
-
-    if [ -n "$pkgdiff" ]; then
-      local ndiff
-      ndiff="$(printf '%s\n' "$pkgdiff" | wc -l | tr -d ' ')"
-      {
-        printf '<details><summary>%s package change(s)</summary>\n\n' "$ndiff"
-        printf '%s\n\n' "$pkgdiff"
-        printf '</details>\n\n'
-      } >>"$report"
-    else
-      printf '_No package changes detected._\n\n' >>"$report"
-    fi
-
-    if [ "$node_changed" = 1 ]; then
-      nnode=$((nnode + 1))
-      local releases
-      releases="$(releases_between "$bver" "$aver")"
-      if [ -n "$releases" ]; then
-        printf '#### Node.js changelog\n\n' >>"$report"
-        while IFS= read -r v; do
-          [ -z "$v" ] && continue
-          sec="$(changelog_section "$v")"
-          printf '<details><summary>v%s</summary>\n\n%s\n\n</details>\n\n' "$v" "$sec" >>"$report"
-        done <<<"$releases"
-      else
-        log "no in-range Node.js releases for ${bver} -> ${aver}"
-      fi
-    fi
-  done
-
-  local final="${WORKDIR}/final.md"
-  {
-    printf '## Docker image changes\n\n'
-    if [ "$nchanged_img" -gt 0 ]; then
-      if [ "$nnode" -gt 0 ]; then
-        printf '%s Docker image(s) changed; %s bumped the Node.js runtime.\n\n' "$nchanged_img" "$nnode"
-      else
-        printf '%s Docker image(s) changed; no Node.js runtime change.\n\n' "$nchanged_img"
-      fi
-      cat "$report"
-    else
-      printf '_No Docker image changes detected in this update._\n'
-    fi
-  } >"$final"
-
-  local block="${WORKDIR}/block.md"
+  block="$(mktemp "${WORKDIR}/block.XXXXXX")"
   {
     printf '%s\n\n' "$MARKER_START"
     cat "$final"
@@ -407,7 +385,7 @@ main() {
   } >"$block"
 
   cat "$final"
-  upsert_pr "$block" "$nchanged_img"
+  upsert_pr "$block" "$nchanged"
 }
 
 main "$@"

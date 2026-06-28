@@ -1,7 +1,7 @@
 #!/bin/bash
-# Reusable helpers for the docker-node-diff plugin. Sourced by both hooks.
+# Reusable helpers for the docker-diff plugin. Sourced by both hooks.
 
-PLUGIN_PREFIX="DOCKER_NODE_DIFF"
+PLUGIN_PREFIX="DOCKER_DIFF"
 
 # plugin_read NAME [default] -> value of BUILDKITE_PLUGIN_<PREFIX>_<NAME>, or default.
 plugin_read() {
@@ -58,6 +58,7 @@ repo_slug() {
 is_node_version() {
   case "$1" in '' | *[!0-9.]*) return 1 ;; esac
   local IFS=.
+  # shellcheck disable=SC2086 # deliberate: split V on dots into the three parts
   set -- $1
   [ $# -eq 3 ] && [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ]
 }
