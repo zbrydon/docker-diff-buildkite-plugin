@@ -142,11 +142,10 @@ upsert_pr() {
 
   local repo_url slug
   repo_url="${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-}}"
-  slug="$(printf '%s' "$repo_url" | sed -E 's#^.*github\.com[:/]##; s#\.git$##; s#/$##')"
+  slug="$(repo_slug "$repo_url")"
 
-  export GH_TOKEN="$token"
   local cur
-  if ! cur="$(gh pr view "$pr" --repo "$slug" --json body -q .body 2>/dev/null)"; then
+  if ! cur="$(GH_TOKEN="$token" gh pr view "$pr" --repo "$slug" --json body -q .body 2>/dev/null)"; then
     log "could not read PR #${pr} body; skipping PR update"
     return 0
   fi
@@ -167,7 +166,7 @@ upsert_pr() {
     return 0
   fi
 
-  if ! gh pr edit "$pr" --repo "$slug" --body-file "$newbody"; then
+  if ! GH_TOKEN="$token" gh pr edit "$pr" --repo "$slug" --body-file "$newbody"; then
     log "could not update PR #${pr}"
     return 0
   fi
@@ -194,6 +193,25 @@ main() {
     log "branch '${branch}' not in allow-list; skipping"
     exit 0
   fi
+
+  # Refuse fork PRs: the diff (and thus the images we pull and the versions we
+  # render) is attacker-controlled when the PR source repo isn't the base repo.
+  # The branch allow-list alone is not a trust boundary -- a fork can name its
+  # branch anything. Only PR builds are gated; non-PR (push) builds on the
+  # renovate branch are the trusted internal case.
+  local pr="${BUILDKITE_PULL_REQUEST:-}"
+  case "$pr" in
+    '' | *[!0-9]*) ;; # not a PR build -> trusted internal build, no fork risk
+    *)
+      local src_repo="${BUILDKITE_PULL_REQUEST_REPO:-}"
+      local base_repo="${BUILDKITE_REPO:-}"
+      if [ -n "$src_repo" ] && [ -n "$base_repo" ] \
+         && [ "$(repo_slug "$src_repo")" != "$(repo_slug "$base_repo")" ]; then
+        log "pull request from a fork (source repo != base repo); refusing to scan untrusted images; skipping"
+        exit 0
+      fi
+      ;;
+  esac
 
   # Diff against origin/<base>, falling back to a local <base>, then HEAD~1.
   local base="${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}"
@@ -236,6 +254,10 @@ main() {
     bver="$(read_node_version "$bref" 2>/dev/null)" || bver=""
     aver="$(read_node_version "$aref" 2>/dev/null)" || aver=""
     if [ -z "$bver" ] || [ -z "$aver" ]; then
+      continue
+    fi
+    if ! is_node_version "$bver" || ! is_node_version "$aver"; then
+      log "unexpected version string from scan; skipping"
       continue
     fi
     if [ "$bver" = "$aver" ]; then

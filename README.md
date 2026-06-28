@@ -21,7 +21,9 @@ steps:
 
 ## How it works
 
-1. **Branch gate** - only runs on the configured `branches`.
+1. **Branch gate** - only runs on the configured `branches`, and on a pull
+   request build only when the PR source repo matches the base repo (so a fork
+   PR cannot drive the scan; see [Security](#security)).
 2. **Diff** - `git diff <default-branch>...HEAD` (the pipeline's default branch) and
    extracts `@sha256:` image refs from the removed (`-`) and added (`+`) lines, pairing
    them by `repo:tag` then by repository. Refs are paired across the whole diff, so a
@@ -54,6 +56,23 @@ The `environment` hook downloads the pinned Syft release, verifies its SHA-256 a
 published `checksums.txt`, and installs it onto `PATH`. This plugin assumes **ephemeral
 agents**: it re-downloads Syft each build and leaves the install dir behind, which would
 accumulate on a persistent agent.
+
+## Security
+
+This plugin scans Docker images and renders content derived from the PR diff
+into the PR description with a write-capable token. Treat the diff as the trust
+boundary:
+
+- **Fork PRs are refused.** The branch allow-list is not a trust boundary - a
+  fork can name its branch anything. On a pull request build the plugin only
+  runs when the PR source repo (`BUILDKITE_PULL_REQUEST_REPO`) matches the base
+  repo (`BUILDKITE_REPO`). Even so, do not expose the PR-write token to
+  fork/untrusted builds as a matter of pipeline policy.
+- **Syft integrity.** The `environment` hook verifies the downloaded Syft
+  archive against the `checksums.txt` published with the same GitHub release.
+  This guards against transport corruption but not a compromised release - there
+  is no cosign/GPG signature verification, so GitHub is the sole integrity root.
+  Pinning `syft-version` mitigates casual tampering.
 
 ## Development
 

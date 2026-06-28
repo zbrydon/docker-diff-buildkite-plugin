@@ -94,14 +94,16 @@ EOF
 }
 
 run_hook() {
-  # $1 = BUILDKITE_PULL_REQUEST value, $2 = branch (default renovate-docker-images)
+  # $1 = BUILDKITE_PULL_REQUEST value, $2 = branch (default renovate-docker-images),
+  # $3 = BUILDKITE_PULL_REQUEST_REPO (default base repo, i.e. same-repo PR)
   run env -i \
     PATH="${STUB}:${PATH}" \
     HOME="${HOME}" \
     BUILDKITE_BRANCH="${2:-renovate-docker-images}" \
     BUILDKITE_PIPELINE_DEFAULT_BRANCH="main" \
     BUILDKITE_PULL_REQUEST="$1" \
-    BUILDKITE_PULL_REQUEST_REPO="https://github.com/acme/widget.git" \
+    BUILDKITE_REPO="https://github.com/acme/widget.git" \
+    BUILDKITE_PULL_REQUEST_REPO="${3:-https://github.com/acme/widget.git}" \
     GITHUB_TOKEN="tok" \
     bash -c "cd '${REPO}' && bash '${HOOK}'"
 }
@@ -170,6 +172,15 @@ run_hook() {
   run_hook false "feature/x"
   [ "$status" -eq 0 ]
   [[ "$output" == *"not in allow-list"* ]]
+}
+
+@test "fork PR (source repo != base repo) is refused before scanning" {
+  printf 'untouched\n' >"${PR_BODY_FILE}"
+  run_hook 42 "renovate-docker-images" "https://github.com/attacker/widget.git"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"refusing to scan"* ]]
+  [ ! -s "${GH_LOG}" ]
+  [ "$(cat "${PR_BODY_FILE}")" = "untouched" ]
 }
 
 @test "non-node image is skipped" {

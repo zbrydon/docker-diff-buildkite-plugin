@@ -49,6 +49,19 @@ image_repo() {
   printf '%s' "${prefix}${name}"
 }
 
+# repo_slug URL -> owner/name, stripping host, scheme, .git suffix, trailing slash.
+repo_slug() {
+  printf '%s' "$1" | sed -E 's#^.*github\.com[:/]##; s#\.git$##; s#/$##'
+}
+
+# is_node_version V -> success when V is exactly major.minor.patch (digits only).
+is_node_version() {
+  case "$1" in '' | *[!0-9.]*) return 1 ;; esac
+  local IFS=.
+  set -- $1
+  [ $# -eq 3 ] && [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ]
+}
+
 # short_digest REF -> first 12 hex chars of the sha256 digest, for logs.
 short_digest() {
   local d="${1##*@sha256:}"

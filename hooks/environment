@@ -86,4 +86,4 @@ echo "docker-node-diff: syft ready (${install_dir}/syft)" >&2
 unset os arch version_no_v tag asset checksums base_url workdir \
       expected actual SYFT_VERSION HOOK_DIR PLUGIN_PREFIX install_dir
 unset -f dl plugin_read read_list_property image_repo_tag image_repo \
-         short_digest version_gt sha256_file
+         short_digest version_gt sha256_file repo_slug is_node_version

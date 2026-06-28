@@ -37,6 +37,27 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "repo_slug normalizes https, ssh, .git and trailing slash" {
+  run repo_slug "https://github.com/acme/widget.git"
+  [ "$output" = "acme/widget" ]
+  run repo_slug "git@github.com:acme/widget.git"
+  [ "$output" = "acme/widget" ]
+  run repo_slug "https://github.com/acme/widget/"
+  [ "$output" = "acme/widget" ]
+}
+
+@test "is_node_version accepts major.minor.patch only" {
+  run is_node_version "20.11.0"
+  [ "$status" -eq 0 ]
+}
+
+@test "is_node_version rejects malformed strings" {
+  for v in "" "20.11" "20.11.0.1" "1.2.x" "latest" ".1.2" "1.2." "1..2"; do
+    run is_node_version "$v"
+    [ "$status" -ne 0 ]
+  done
+}
+
 @test "plugin_read falls back to default" {
   unset BUILDKITE_PLUGIN_DOCKER_NODE_DIFF_SYFT_VERSION || true
   run plugin_read SYFT_VERSION "v1.46.0"
