@@ -8,7 +8,7 @@ setup() {
 
   REPO="$(mktemp -d)"
   (
-    cd "$REPO"
+    cd "$REPO" || exit 1
     git init -q
     git config user.email t@t.com
     git config user.name t
@@ -25,7 +25,9 @@ setup() {
   PR_BODY_FILE="$(mktemp)"
   export GH_LOG PR_BODY_FILE
 
-  # syft stub: map digest -> node version (default: 20.9.0 -> 20.11.0)
+  # syft stub: map digest -> node version (default: 20.9.0 -> 20.11.0). Every
+  # scan also carries a libssl package that always changes between digests, so
+  # there is a non-node package diff even when the Node.js version is unchanged.
   syft_versions "20.9.0" "20.11.0"
 
   cat >"${STUB}/curl" <<'EOF'
@@ -73,22 +75,28 @@ teardown() {
   rm -rf "${REPO}" "${STUB}" "${GH_LOG}" "${PR_BODY_FILE}"
 }
 
-# syft_versions BEFORE AFTER -> rewrite the syft stub
+# syft_versions BEFORE AFTER -> rewrite the syft stub. Each image carries a
+# libssl package (version keyed by digest, so it always differs) plus the node
+# binary at the requested version (omitted when the version is empty).
 syft_versions() {
   cat >"${STUB}/syft" <<EOF
 #!/bin/bash
 ref=""
 for a in "\$@"; do case "\$a" in registry:*) ref="\$a";; esac; done
 case "\$ref" in
-  *${B_DIGEST}*) ver="$1" ;;
-  *${A_DIGEST}*) ver="$2" ;;
-  *) ver="" ;;
+  *${B_DIGEST}*) node="$1"; ssl="3.5.6-1~deb13u1" ;;
+  *${A_DIGEST}*) node="$2"; ssl="3.5.6-1~deb13u2" ;;
+  *) node=""; ssl="" ;;
 esac
-if [ -n "\$ver" ]; then
-  printf '{"artifacts":[{"name":"node","type":"binary","version":"%s"}]}\n' "\$ver"
-else
-  printf '{"artifacts":[]}\n'
+arts=""
+if [ -n "\$ssl" ]; then
+  arts="{\"name\":\"libssl3t64\",\"type\":\"deb\",\"version\":\"\${ssl}\"}"
 fi
+if [ -n "\$node" ]; then
+  [ -n "\$arts" ] && arts="\${arts},"
+  arts="\${arts}{\"name\":\"node\",\"type\":\"binary\",\"version\":\"\${node}\"}"
+fi
+printf '{"artifacts":[%s]}\n' "\$arts"
 EOF
   chmod +x "${STUB}/syft"
 }
@@ -117,7 +125,7 @@ run_hook() {
   grep -q "v20.11.0</summary>" "${PR_BODY_FILE}"
   grep -q "v20.10.0</summary>" "${PR_BODY_FILE}"
   # the before-version is not in range (before < v <= after)
-  ! grep -q "v20.9.0</summary>" "${PR_BODY_FILE}"
+  run ! grep -q "v20.9.0</summary>" "${PR_BODY_FILE}"
   grep -q "Original body." "${PR_BODY_FILE}"
 }
 
@@ -143,18 +151,41 @@ run_hook() {
   [ "$(grep -c "docker-node-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
 }
 
-@test "no version change clears a stale block" {
+@test "no node change still lists the package diff and clears stale changelogs" {
   printf 'Original body.\n' >"${PR_BODY_FILE}"
   run_hook 42
   grep -q "v20.11.0</summary>" "${PR_BODY_FILE}"
   syft_versions "20.9.0" "20.9.0"
   run_hook 42
-  grep -q "No Node.js runtime version changes" "${PR_BODY_FILE}"
+  # node unchanged -> changelog blocks gone, but the libssl bump is still listed
+  grep -q "no Node.js runtime change" "${PR_BODY_FILE}"
+  grep -q "libssl3t64" "${PR_BODY_FILE}"
   ! grep -q "v20.11.0</summary>" "${PR_BODY_FILE}"
 }
 
-@test "no changes and no existing block leaves the PR untouched" {
+@test "package-only diff posts a fresh block with no existing markers" {
+  # The real-world case: a digest bump that changes packages (libssl) but not
+  # the Node.js runtime, on a PR whose description has no existing block.
   syft_versions "20.9.0" "20.9.0"
+  printf 'Original body.\n' >"${PR_BODY_FILE}"
+  run_hook 42
+  [ "$status" -eq 0 ]
+  grep -q "docker-node-diff:start" "${PR_BODY_FILE}"
+  grep -q "Docker image changes" "${PR_BODY_FILE}"
+  grep -q "libssl3t64" "${PR_BODY_FILE}"
+  grep -q "no Node.js runtime change" "${PR_BODY_FILE}"
+  grep -q "Original body." "${PR_BODY_FILE}"
+}
+
+@test "no image changes and no existing block leaves the PR untouched" {
+  (
+    cd "$REPO"
+    git checkout -q renovate-docker-images
+    # Keep the same digest as main and change only a non-image line, so the diff
+    # carries no @sha256 refs at all.
+    printf 'FROM node:20@sha256:%s\n# unrelated change\n' "$B_DIGEST" >Dockerfile
+    git add -A && git commit -qm noise
+  )
   printf 'Pristine body.\n' >"${PR_BODY_FILE}"
   run_hook 42
   [ "$(cat "${PR_BODY_FILE}")" = "Pristine body." ]
@@ -183,12 +214,14 @@ run_hook() {
   [ "$(cat "${PR_BODY_FILE}")" = "untouched" ]
 }
 
-@test "non-node image is skipped" {
+@test "non-node image still lists its package diff but no changelog" {
   syft_versions "" ""
   printf 'body\n' >"${PR_BODY_FILE}"
   run_hook 42
   [ "$status" -eq 0 ]
-  grep -q "No Node.js runtime version changes" "${PR_BODY_FILE}" || [ "$(cat "${PR_BODY_FILE}")" = "body" ]
+  grep -q "no Node.js runtime change" "${PR_BODY_FILE}"
+  grep -q "libssl3t64" "${PR_BODY_FILE}"
+  ! grep -q "summary>v" "${PR_BODY_FILE}"
 }
 
 @test "handles multiple changed images" {
@@ -222,5 +255,5 @@ EOF
   chmod +x "${STUB}/syft"
   printf 'body\n' >"${PR_BODY_FILE}"
   run_hook 42
-  grep -q "2 Docker image(s) bumped" "${PR_BODY_FILE}"
+  grep -q "2 bumped the Node.js runtime" "${PR_BODY_FILE}"
 }

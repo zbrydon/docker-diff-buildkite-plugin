@@ -1,6 +1,7 @@
 #!/bin/bash
-# Core logic: detect Node.js runtime version bumps from a Renovate Docker-digest
-# diff and post the Node.js changelogs in between into the PR description.
+# Core logic: on a Renovate Docker-digest diff, scan every bumped image with Syft
+# and post its package-level SBOM diff into the PR description. When an image's
+# Node.js runtime version changed, also post the Node.js changelogs in between.
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,14 +19,43 @@ trap 'rm -rf "${WORKDIR}"' EXIT
 
 log() { echo "docker-node-diff: $*" >&2; }
 
-# Scans the image with Syft and prefers the binary artifact's version over a
-# generic "node" package entry, since only the former reflects the real runtime.
-read_node_version() {
-  local ref="$1"
-  syft scan "registry:${ref}" -q -o syft-json 2>/dev/null \
-    | jq -r '[.artifacts[] | select(.name == "node")] as $n
-             | (($n | map(select(.type == "binary")) | .[0].version)
-                // ($n | .[0].version) // empty)'
+# Scans an image with Syft into a normalized "type<TAB>name<TAB>version" list,
+# one package per line, sorted. Leaves an empty file if the scan fails.
+scan_packages() {
+  local ref="$1" out="$2"
+  if ! syft scan "registry:${ref}" -q -o syft-json 2>/dev/null \
+       | jq -r '.artifacts[] | [.type, .name, .version] | @tsv' \
+       | sort -u >"$out"; then
+    : >"$out"
+  fi
+}
+
+# Reads the Node.js runtime version from a scan file, preferring the binary
+# artifact (the real runtime) over a generic "node" package entry.
+node_version_from() {
+  awk -F'\t' '
+    $2 == "node" { if ($1 == "binary") b = $3; else if (g == "") g = $3 }
+    END { print (b != "" ? b : g) }
+  ' "$1"
+}
+
+# Markdown bullets describing how the package set changed from $1 (old scan) to
+# $2 (new scan): one line per added, removed, or version-changed package, sorted
+# by name. Packages are keyed by type+name so a version move is a single bump
+# rather than an add/remove pair.
+diff_packages() {
+  awk -F'\t' '
+    FNR == NR { ov[$1 FS $2] = $3; onm[$1 FS $2] = $2; next }
+    {
+      k = $1 FS $2; seen[k] = 1
+      if (!(k in ov))       printf "%s\t- `%s` added (`%s`)\n", $2, $2, $3
+      else if (ov[k] != $3) printf "%s\t- `%s`: `%s` → `%s`\n", $2, $2, ov[k], $3
+    }
+    END {
+      for (k in ov) if (!(k in seen))
+        printf "%s\t- `%s` removed (`%s`)\n", onm[k], onm[k], ov[k]
+    }
+  ' "$1" "$2" | sort -f | cut -f2-
 }
 
 fetch_dist_index() {
@@ -117,7 +147,7 @@ pair_digests() {
 
 upsert_pr() {
   local blockfile="$1"
-  local changed="$2"
+  local have_content="$2"
 
   local pr="${BUILDKITE_PULL_REQUEST:-}"
   case "$pr" in
@@ -159,10 +189,10 @@ upsert_pr() {
       index($0, end)   { skip = 0; next }
       !skip            { print }
     ' <<<"$cur" >"$newbody"
-  elif [ "$changed" -gt 0 ]; then
+  elif [ "$have_content" -gt 0 ]; then
     { printf '%s\n\n---\n\n' "$cur"; cat "$blockfile"; } >"$newbody"
   else
-    log "no changes and no existing block; leaving PR description untouched"
+    log "no image changes and no existing block; leaving PR description untouched"
     return 0
   fi
 
@@ -243,58 +273,99 @@ main() {
 
   local report="${WORKDIR}/report.md"
   : >"$report"
-  local changed=0
+  local nchanged_img=0 nnode=0
   local npairs=${#pairs_before[@]}
   local p bref aref bver aver v sec
+  local seen=()
   for ((p = 0; p < npairs; p++)); do
     bref="${pairs_before[$p]}"
     aref="${pairs_after[$p]}"
-    log "checking $(image_repo "$aref") ($(short_digest "$bref") -> $(short_digest "$aref"))"
 
-    bver="$(read_node_version "$bref" 2>/dev/null)" || bver=""
-    aver="$(read_node_version "$aref" 2>/dev/null)" || aver=""
-    if [ -z "$bver" ] || [ -z "$aver" ]; then
-      continue
-    fi
-    if ! is_node_version "$bver" || ! is_node_version "$aver"; then
-      log "unexpected version string from scan; skipping"
-      continue
-    fi
-    if [ "$bver" = "$aver" ]; then
-      continue
+    # Skip duplicate before->after pairs (e.g. one image pinned via several
+    # compose anchors) so each digest bump is scanned and reported once.
+    local sig="${bref}=>${aref}" s dup=0
+    for s in "${seen[@]}"; do [ "$s" = "$sig" ] && { dup=1; break; }; done
+    [ "$dup" = 1 ] && continue
+    seen+=("$sig")
+
+    local repo bshort ashort
+    repo="$(image_repo "$aref")"
+    bshort="$(short_digest "$bref")"
+    ashort="$(short_digest "$aref")"
+    log "checking ${repo} (${bshort} -> ${ashort})"
+
+    local oldpkgs="${WORKDIR}/old.${p}.tsv" newpkgs="${WORKDIR}/new.${p}.tsv"
+    scan_packages "$bref" "$oldpkgs"
+    scan_packages "$aref" "$newpkgs"
+
+    bver="$(node_version_from "$oldpkgs")"
+    aver="$(node_version_from "$newpkgs")"
+
+    local node_changed=0
+    if [ -n "$bver" ] && [ -n "$aver" ] \
+       && is_node_version "$bver" && is_node_version "$aver" \
+       && [ "$bver" != "$aver" ]; then
+      node_changed=1
     fi
 
-    local releases
-    releases="$(releases_between "$bver" "$aver")"
-    if [ -z "$releases" ]; then
-      log "no in-range Node.js releases for ${bver} -> ${aver}; skipping"
-      continue
-    fi
+    local pkgdiff
+    pkgdiff="$(diff_packages "$oldpkgs" "$newpkgs")"
 
-    changed=$((changed + 1))
+    nchanged_img=$((nchanged_img + 1))
+
+    # Every bumped image gets a section with its package diff; the Node.js
+    # version line and changelogs are added only when the runtime moved.
     {
       # shellcheck disable=SC2016 # backticks are literal markdown, not command substitution
-      printf '### %s (`%s` → `%s`)\n\n' \
-        "$(image_repo "$aref")" "$(short_digest "$bref")" "$(short_digest "$aref")"
-      # shellcheck disable=SC2016
-      printf 'Node.js `%s` → `%s`\n\n' "$bver" "$aver"
+      printf '### %s (`%s` → `%s`)\n\n' "$repo" "$bshort" "$ashort"
     } >>"$report"
 
-    while IFS= read -r v; do
-      [ -z "$v" ] && continue
-      sec="$(changelog_section "$v")"
-      printf '<details><summary>v%s</summary>\n\n%s\n\n</details>\n\n' "$v" "$sec" >>"$report"
-    done <<<"$releases"
+    if [ "$node_changed" = 1 ]; then
+      # shellcheck disable=SC2016
+      printf 'Node.js `%s` → `%s`\n\n' "$bver" "$aver" >>"$report"
+    fi
+
+    if [ -n "$pkgdiff" ]; then
+      local ndiff
+      ndiff="$(printf '%s\n' "$pkgdiff" | wc -l | tr -d ' ')"
+      {
+        printf '<details><summary>%s package change(s)</summary>\n\n' "$ndiff"
+        printf '%s\n\n' "$pkgdiff"
+        printf '</details>\n\n'
+      } >>"$report"
+    else
+      printf '_No package changes detected._\n\n' >>"$report"
+    fi
+
+    if [ "$node_changed" = 1 ]; then
+      nnode=$((nnode + 1))
+      local releases
+      releases="$(releases_between "$bver" "$aver")"
+      if [ -n "$releases" ]; then
+        printf '#### Node.js changelog\n\n' >>"$report"
+        while IFS= read -r v; do
+          [ -z "$v" ] && continue
+          sec="$(changelog_section "$v")"
+          printf '<details><summary>v%s</summary>\n\n%s\n\n</details>\n\n' "$v" "$sec" >>"$report"
+        done <<<"$releases"
+      else
+        log "no in-range Node.js releases for ${bver} -> ${aver}"
+      fi
+    fi
   done
 
   local final="${WORKDIR}/final.md"
   {
-    printf '## Node.js version changes\n\n'
-    if [ "$changed" -gt 0 ]; then
-      printf '%s Docker image(s) bumped the Node.js runtime in this update.\n\n' "$changed"
+    printf '## Docker image changes\n\n'
+    if [ "$nchanged_img" -gt 0 ]; then
+      if [ "$nnode" -gt 0 ]; then
+        printf '%s Docker image(s) changed; %s bumped the Node.js runtime.\n\n' "$nchanged_img" "$nnode"
+      else
+        printf '%s Docker image(s) changed; no Node.js runtime change.\n\n' "$nchanged_img"
+      fi
       cat "$report"
     else
-      printf '_No Node.js runtime version changes detected in this update._\n'
+      printf '_No Docker image changes detected in this update._\n'
     fi
   } >"$final"
 
@@ -306,7 +377,7 @@ main() {
   } >"$block"
 
   cat "$final"
-  upsert_pr "$block" "$changed"
+  upsert_pr "$block" "$nchanged_img"
 }
 
 main "$@"
