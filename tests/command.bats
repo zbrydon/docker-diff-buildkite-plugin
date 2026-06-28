@@ -62,6 +62,8 @@ EOF
 echo "gh \$*" >> "${GH_LOG}"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
   cat "${PR_BODY_FILE}"
+elif [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
+  printf '%s' "\${GH_PR_LIST_NUMBER:-}"
 elif [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
   bf=""; prev=""
   for a in "\$@"; do [ "\$prev" = "--body-file" ] && bf="\$a"; prev="\$a"; done
@@ -113,6 +115,7 @@ run_hook() {
     BUILDKITE_REPO="https://github.com/acme/widget.git" \
     BUILDKITE_PULL_REQUEST_REPO="${3:-https://github.com/acme/widget.git}" \
     GITHUB_TOKEN="tok" \
+    GH_PR_LIST_NUMBER="${GH_PR_LIST_NUMBER:-}" \
     bash -c "cd '${REPO}' && bash '${HOOK}'"
 }
 
@@ -191,12 +194,23 @@ run_hook() {
   [ "$(cat "${PR_BODY_FILE}")" = "Pristine body." ]
 }
 
-@test "non-PR build skips the PR update" {
+@test "branch-push build with no open PR skips the PR update" {
   printf 'untouched\n' >"${PR_BODY_FILE}"
-  run_hook false
+  GH_PR_LIST_NUMBER="" run_hook false
   [ "$status" -eq 0 ]
-  [ ! -s "${GH_LOG}" ]
+  # only the branch lookup is attempted; no view/edit
+  grep -q "gh pr list" "${GH_LOG}"
+  run ! grep -q "gh pr edit" "${GH_LOG}"
   [ "$(cat "${PR_BODY_FILE}")" = "untouched" ]
+}
+
+@test "branch-push build resolves an open PR by branch and updates it" {
+  printf 'Original body.\n' >"${PR_BODY_FILE}"
+  GH_PR_LIST_NUMBER="42" run_hook false
+  [ "$status" -eq 0 ]
+  grep -q "gh pr list" "${GH_LOG}"
+  grep -q "docker-node-diff:start" "${PR_BODY_FILE}"
+  grep -q "Original body." "${PR_BODY_FILE}"
 }
 
 @test "branch not in allow-list is skipped" {

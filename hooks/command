@@ -149,14 +149,6 @@ upsert_pr() {
   local blockfile="$1"
   local have_content="$2"
 
-  local pr="${BUILDKITE_PULL_REQUEST:-}"
-  case "$pr" in
-    '' | *[!0-9]*)
-      log "not a pull request; skipping PR update"
-      return 0
-      ;;
-  esac
-
   if ! command -v gh >/dev/null 2>&1; then
     log "gh not on PATH; skipping PR update"
     return 0
@@ -173,6 +165,29 @@ upsert_pr() {
   local repo_url slug
   repo_url="${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-}}"
   slug="$(repo_slug "$repo_url")"
+
+  local pr="${BUILDKITE_PULL_REQUEST:-}"
+  case "$pr" in
+    '' | *[!0-9]*)
+      # Buildkite only sets BUILDKITE_PULL_REQUEST to a number on PR-triggered
+      # builds; for branch-push builds it is "false". Fall back to looking up an
+      # open PR (including drafts) for the current branch.
+      local branch="${BUILDKITE_BRANCH:-}"
+      if [ -z "$branch" ]; then
+        log "not a pull request and no branch to resolve; skipping PR update"
+        return 0
+      fi
+      pr="$(GH_TOKEN="$token" gh pr list --repo "$slug" --head "$branch" \
+            --state open --json number -q '.[0].number' 2>/dev/null)"
+      case "$pr" in
+        '' | *[!0-9]*)
+          log "no open PR for branch ${branch}; skipping PR update"
+          return 0
+          ;;
+      esac
+      log "resolved open PR #${pr} for branch ${branch}"
+      ;;
+  esac
 
   local cur
   if ! cur="$(GH_TOKEN="$token" gh pr view "$pr" --repo "$slug" --json body -q .body 2>/dev/null)"; then

@@ -37,7 +37,11 @@ steps:
    `https://nodejs.org/dist/index.json`, selects every release with `before < v <= after`
    (capped at 20), and extracts each release's section from the Node.js changelog on GitHub.
 5. **Upsert** - writes the report between hidden markers in the PR description via `gh`,
-   replacing any previous block so the description stays current.
+   replacing any previous block so the description stays current. On a PR-triggered build
+   Buildkite supplies the PR number in `BUILDKITE_PULL_REQUEST`; on a branch-push build
+   (where that variable is `false`, e.g. for many draft PRs) the plugin falls back to
+   `gh pr list --head <branch> --state open` to resolve an open PR (drafts included) for
+   the current branch, and skips the update if none exists.
 
 ## Configuration
 
