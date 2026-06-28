@@ -45,15 +45,30 @@ node_version_from() {
 # rather than an add/remove pair.
 diff_packages() {
   awk -F'\t' '
-    FNR == NR { ov[$1 FS $2] = $3; onm[$1 FS $2] = $2; next }
+    # Registry/distro page for a package, or "" when we have no good target.
+    # node is matched by name (its artifact type is "binary") before the
+    # type-based cases so the runtime still gets a link.
+    function pkg_url(type, name, ver) {
+      if (name == "node")  return "https://nodejs.org/en/blog/release/v" ver
+      if (type == "npm")   return "https://www.npmjs.com/package/" name "/v/" ver
+      if (type == "deb")   return "https://packages.debian.org/" name
+      if (type == "apk")   return "https://pkgs.alpinelinux.org/packages?name=" name
+      return ""
+    }
+    # Package name as clickable inline code, or plain inline code when unlinked.
+    function lnk(type, name, ver,   u) {
+      u = pkg_url(type, name, ver)
+      return u == "" ? "`" name "`" : "[`" name "`](" u ")"
+    }
+    FNR == NR { ov[$1 FS $2] = $3; onm[$1 FS $2] = $2; otype[$1 FS $2] = $1; next }
     {
       k = $1 FS $2; seen[k] = 1
-      if (!(k in ov))       printf "%s\t- `%s` added (`%s`)\n", $2, $2, $3
-      else if (ov[k] != $3) printf "%s\t- `%s`: `%s` → `%s`\n", $2, $2, ov[k], $3
+      if (!(k in ov))       printf "%s\t- %s added (`%s`)\n", $2, lnk($1, $2, $3), $3
+      else if (ov[k] != $3) printf "%s\t- %s: `%s` → `%s`\n", $2, lnk($1, $2, $3), ov[k], $3
     }
     END {
       for (k in ov) if (!(k in seen))
-        printf "%s\t- `%s` removed (`%s`)\n", onm[k], onm[k], ov[k]
+        printf "%s\t- %s removed (`%s`)\n", onm[k], lnk(otype[k], onm[k], ov[k]), ov[k]
     }
   ' "$1" "$2" | sort -f | cut -f2-
 }

@@ -32,7 +32,9 @@ steps:
    the same image pinned via several Compose anchors) are scanned and reported once.
 3. **Scan & diff packages** - `syft scan registry:<ref>` catalogues each image's packages.
    For every bumped image the report lists the package changes (added / removed / version
-   bumped), including non-Node packages such as `libssl3t64`.
+   bumped), including non-Node packages such as `libssl3t64`. Each changed package name
+   links to its registry/distro page (npm, Debian packages, Alpine packages) or the
+   Node.js release notes for `node`.
 4. **Changelogs** - when the `node` package version moved, fetches
    `https://nodejs.org/dist/index.json`, selects every release with `before < v <= after`
    (capped at 20), and extracts each release's section from the Node.js changelog on GitHub.

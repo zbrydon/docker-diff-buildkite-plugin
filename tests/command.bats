@@ -130,6 +130,9 @@ run_hook() {
   # the before-version is not in range (before < v <= after)
   run ! grep -q "v20.9.0</summary>" "${PR_BODY_FILE}"
   grep -q "Original body." "${PR_BODY_FILE}"
+  # changed packages link to their registry/distro page
+  grep -q '\[`libssl3t64`\](https://packages.debian.org/libssl3t64)' "${PR_BODY_FILE}"
+  grep -q '\[`node`\](https://nodejs.org/en/blog/release/v20.11.0)' "${PR_BODY_FILE}"
 }
 
 @test "re-run replaces the block in place (idempotent)" {
