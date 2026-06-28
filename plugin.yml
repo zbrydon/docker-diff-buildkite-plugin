@@ -1,0 +1,20 @@
+name: Docker Node Diff
+description: On a Renovate Docker-digest PR, post the Node.js changelogs between the old and new runtime versions into the PR description.
+author: https://github.com/zbrydon
+requirements:
+  - jq
+  - git
+  - curl
+  - tar
+configuration:
+  properties:
+    branches:
+      type: [string, array]
+      description: Branch allow-list gate. Defaults to "renovate-docker-images".
+    syft-version:
+      type: string
+      description: Pinned Syft release to install. Defaults to "v1.46.0".
+    github-token-env:
+      type: string
+      description: Name of the env var holding the PR-write token. Defaults to "GITHUB_TOKEN".
+  additionalProperties: false

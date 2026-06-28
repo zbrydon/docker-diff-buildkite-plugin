@@ -1,0 +1,89 @@
+#!/bin/bash
+# Installs a pinned, checksum-verified Syft onto PATH for the build.
+# This hook is SOURCED: it must fall through on success (no `exit 0`) so the
+# exported PATH survives, and only `exit 1` on hard failure. Because it is
+# sourced, it snapshots the shell options and EXIT trap up front and restores
+# them on the success path so `set -euo pipefail` and the cleanup trap do not
+# leak into (or clobber) the agent's bootstrap shell. The `exit 1` hard-failure
+# paths intentionally abort the bootstrap, so they skip the restore.
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/shared.bash
+source "${HOOK_DIR}/../lib/shared.bash"
+
+SYFT_VERSION="$(plugin_read SYFT_VERSION "v1.46.0")"
+
+__dnd_oldopts="$(set +o)"
+__dnd_oldtrap="$(trap -p EXIT)"
+set -euo pipefail
+
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+arch="$(uname -m)"
+case "$arch" in
+  x86_64 | amd64) arch="amd64" ;;
+  aarch64 | arm64) arch="arm64" ;;
+  *)
+    echo ":docker: docker-node-diff: unsupported architecture: ${arch}" >&2
+    exit 1
+    ;;
+esac
+
+version_no_v="${SYFT_VERSION#v}"
+tag="v${version_no_v}"
+asset="syft_${version_no_v}_${os}_${arch}.tar.gz"
+checksums="syft_${version_no_v}_checksums.txt"
+base_url="https://github.com/anchore/syft/releases/download/${tag}"
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "${workdir}"' EXIT
+
+dl() {
+  curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"
+}
+
+echo ":docker: docker-node-diff: installing syft ${tag} for ${os}/${arch}" >&2
+
+if ! dl "${base_url}/${asset}" "${workdir}/${asset}"; then
+  echo "docker-node-diff: failed to download ${asset}" >&2
+  exit 1
+fi
+if ! dl "${base_url}/${checksums}" "${workdir}/${checksums}"; then
+  echo "docker-node-diff: failed to download ${checksums}" >&2
+  exit 1
+fi
+
+expected="$(awk -v f="${asset}" '$2 == f {print $1}' "${workdir}/${checksums}")"
+if [ -z "${expected}" ]; then
+  echo "docker-node-diff: no checksum entry for ${asset}" >&2
+  exit 1
+fi
+actual="$(sha256_file "${workdir}/${asset}")"
+if [ "${expected}" != "${actual}" ]; then
+  echo "docker-node-diff: checksum mismatch for ${asset}" >&2
+  echo "  expected: ${expected}" >&2
+  echo "  actual:   ${actual}" >&2
+  exit 1
+fi
+
+install_dir="$(mktemp -d)"
+tar -xzf "${workdir}/${asset}" -C "${workdir}" syft
+install -m 0755 "${workdir}/syft" "${install_dir}/syft"
+
+# Success: clean up our workdir, then restore the sourcing shell's options and
+# EXIT trap before falling through so nothing leaks into the bootstrap.
+rm -rf "${workdir}"
+trap - EXIT
+[ -n "${__dnd_oldtrap}" ] && eval "${__dnd_oldtrap}"
+eval "${__dnd_oldopts}"
+unset __dnd_oldopts __dnd_oldtrap
+
+export PATH="${install_dir}:${PATH}"
+echo "docker-node-diff: syft ready (${install_dir}/syft)" >&2
+
+# Sourced hook: drop our working vars and helper functions so generic names
+# (os/arch/workdir/...) and lib/shared.bash's functions do not leak into (or
+# clobber a later plugin's use of) the agent's bootstrap shell.
+unset os arch version_no_v tag asset checksums base_url workdir \
+      expected actual SYFT_VERSION HOOK_DIR PLUGIN_PREFIX install_dir
+unset -f dl plugin_read read_list_property image_repo_tag image_repo \
+         short_digest version_gt sha256_file

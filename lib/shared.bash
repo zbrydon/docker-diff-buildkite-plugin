@@ -1,0 +1,73 @@
+#!/bin/bash
+# Reusable helpers for the docker-node-diff plugin. Sourced by both hooks.
+
+PLUGIN_PREFIX="DOCKER_NODE_DIFF"
+
+# plugin_read NAME [default] -> value of BUILDKITE_PLUGIN_<PREFIX>_<NAME>, or default.
+plugin_read() {
+  local name="$1"
+  local default="${2:-}"
+  local var="BUILDKITE_PLUGIN_${PLUGIN_PREFIX}_${name}"
+  printf '%s' "${!var:-$default}"
+}
+
+# read_list_property NAME -> fills global array `result` from a scalar or _0,_1,... array.
+# Returns non-zero when the property is unset/empty.
+read_list_property() {
+  local base="BUILDKITE_PLUGIN_${PLUGIN_PREFIX}_${1}"
+  result=()
+
+  if [ -n "${!base:-}" ]; then
+    result+=("${!base}")
+  fi
+
+  local i=0
+  local key="${base}_${i}"
+  while [ -n "${!key:-}" ]; do
+    result+=("${!key}")
+    i=$((i + 1))
+    key="${base}_${i}"
+  done
+
+  [ ${#result[@]} -gt 0 ]
+}
+
+# image_repo_tag REF -> REF with the @digest removed.
+image_repo_tag() {
+  printf '%s' "${1%@*}"
+}
+
+# image_repo REF -> registry/name, stripping :tag and @digest (registry ports kept).
+image_repo() {
+  local ref="${1%@*}"        # drop @digest
+  local name="${ref##*/}"    # last path segment, may carry :tag
+  local prefix=""
+  if [ "$name" != "$ref" ]; then
+    prefix="${ref%/*}/"      # registry[:port]/path/
+  fi
+  name="${name%:*}"          # drop :tag (tags never contain ':')
+  printf '%s' "${prefix}${name}"
+}
+
+# short_digest REF -> first 12 hex chars of the sha256 digest, for logs.
+short_digest() {
+  local d="${1##*@sha256:}"
+  printf '%s' "${d:0:12}"
+}
+
+# version_gt A B -> success when A is strictly greater than B (numeric, via sort -V).
+version_gt() {
+  [ "$1" = "$2" ] && return 1
+  local hi
+  hi="$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)"
+  [ "$hi" = "$1" ]
+}
+
+# sha256_file FILE -> lowercase hex sha256 of FILE (portable across sha256sum/shasum).
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
