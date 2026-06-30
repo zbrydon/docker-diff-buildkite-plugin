@@ -352,9 +352,12 @@ upsert_pr() {
     # the content both above and below the block.
     awk -v start="$MARKER_START" -v end="$MARKER_END" -v bf="$blockfile" '
       function dumpblock() { while ((getline l < bf) > 0) print l; close(bf) }
-      index($0, start) { if (!done) { dumpblock(); done = 1 } skip = 1; next }
-      index($0, end)   { skip = 0; next }
-      !skip            { print }
+      function flushbuf(   i) { for (i = 1; i <= n; i++) print buf[i]; n = 0 }
+      index($0, start)       { if (!done) { dumpblock(); done = 1 } skip = 1; n = 0; next }
+      skip && index($0, end) { skip = 0; n = 0; next }
+      skip                   { buf[++n] = $0; next }
+      !skip                  { print }
+      END                    { if (skip) flushbuf() }
     ' <<<"$cur" >"$newbody"
   elif [ -n "$cur" ]; then
     # First post into a non-empty body: separate it from the block.
