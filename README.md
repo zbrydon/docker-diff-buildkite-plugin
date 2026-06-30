@@ -91,6 +91,8 @@ boundary:
 
 ### Updating Syft
 
+TODO: Replace with renovate
+
 To bump the pinned version, recompute the digest of the new release's
 `checksums.txt` and update `SYFT_DEFAULT_PIN` in `hooks/environment` (or the
 `syft-version` option in your pipeline):
