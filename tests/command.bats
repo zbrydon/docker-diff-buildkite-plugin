@@ -291,6 +291,44 @@ run_hook() {
   ! grep -q "summary>v" "${PR_BODY_FILE}"
 }
 
+@test "a failed scan renders a note, not a misleading full diff" {
+  # syft fails on the OLD image (transient registry/network blip). The empty
+  # old SBOM must not be rendered as "everything in the new image was added".
+  cat >"${STUB}/syft" <<EOF
+#!/bin/bash
+ref=""
+for a in "\$@"; do case "\$a" in registry:*) ref="\$a";; esac; done
+case "\$ref" in
+  *${B_DIGEST}*) exit 1 ;;
+  *${A_DIGEST}*) printf '{"artifacts":[{"name":"libssl3t64","type":"deb","version":"3.5.6-1~deb13u2"},{"name":"node","type":"binary","version":"20.11.0"}]}\n' ;;
+  *) printf '{"artifacts":[]}\n' ;;
+esac
+EOF
+  chmod +x "${STUB}/syft"
+  printf 'Original body.\n' >"${PR_BODY_FILE}"
+  run_hook 42
+  [ "$status" -eq 0 ]
+  grep -q "Package scan failed" "${PR_BODY_FILE}"
+  # nothing should be reported as an added package
+  ! grep -q "added" "${PR_BODY_FILE}"
+}
+
+@test "orphaned start marker keeps the content below it" {
+  # A hand-edited / truncated body whose docker-diff:start lost its matching
+  # docker-diff:end must not have everything below the marker deleted.
+  {
+    echo "Original body."
+    echo "<!-- docker-diff:start -->"
+    echo "stale interior"
+    echo "KEEP-ME-BELOW"
+  } >"${PR_BODY_FILE}"
+  run_hook 42
+  [ "$status" -eq 0 ]
+  grep -q "KEEP-ME-BELOW" "${PR_BODY_FILE}"
+  [ "$(grep -c "docker-diff:start" "${PR_BODY_FILE}")" -eq 1 ]
+  [ "$(grep -c "docker-diff:end" "${PR_BODY_FILE}")" -eq 1 ]
+}
+
 @test "handles multiple changed images" {
   (
     cd "$REPO"
