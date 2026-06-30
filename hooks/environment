@@ -50,21 +50,21 @@ dl() {
 
 echo ":docker: docker-diff: installing syft ${tag} for ${os}/${arch}" >&2
 
-if ! dl "${base_url}/${asset}" "${workdir}/${asset}"; then
-  echo "docker-diff: failed to download ${asset}" >&2
-  exit 1
-fi
 if ! dl "${base_url}/${checksums}" "${workdir}/${checksums}"; then
   echo "docker-diff: failed to download ${checksums}" >&2
   exit 1
 fi
-
 
 manifest_actual="$(sha256_file "${workdir}/${checksums}")"
 if [ "${SYFT_PIN_SHA256}" != "${manifest_actual}" ]; then
   echo "docker-diff: syft checksums.txt does not match the pinned sha256" >&2
   echo "  pinned: ${SYFT_PIN_SHA256}" >&2
   echo "  actual: ${manifest_actual}" >&2
+  exit 1
+fi
+
+if ! dl "${base_url}/${asset}" "${workdir}/${asset}"; then
+  echo "docker-diff: failed to download ${asset}" >&2
   exit 1
 fi
 

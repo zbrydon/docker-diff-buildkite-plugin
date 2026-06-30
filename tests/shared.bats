@@ -110,6 +110,7 @@ setup() {
   full="2fefc202b2eccab83888cc91f5a364a75df0dd777afbbae5b5e23ebd93d81ac6"
   for p in \
     "@sha256:${full}" \
+    "v1.46.0 oops@sha256:${full}" \
     "v1.46.0@sha256:${short}" \
     "v1.46.0@sha256:${full}zz" \
     "v1.46.0@sha1:${full}" \
