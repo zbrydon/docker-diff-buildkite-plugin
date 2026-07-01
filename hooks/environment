@@ -103,5 +103,5 @@ unset os arch version_no_v tag asset checksums base_url workdir \
       expected actual SYFT_VERSION HOOK_DIR PLUGIN_PREFIX install_dir \
       pin manifest_actual SYFT_PIN_VERSION SYFT_PIN_SHA256 SYFT_DEFAULT_PIN
 unset -f dl plugin_read read_list_property image_repo_tag image_repo \
-         short_digest version_gt sha256_file repo_slug is_node_version \
-         parse_syft_pin
+         image_repo_family short_digest version_gt sha256_file repo_slug \
+         is_node_version parse_syft_pin
