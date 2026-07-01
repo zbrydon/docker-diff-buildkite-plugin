@@ -157,9 +157,14 @@ resolve_diff_base() {
 extract_refs() {
   local diff="$1" removed="$2" added="$3"
   local regex='[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-fA-F]{64}'
-  printf '%s\n' "$diff" | grep '^-' | grep -oE "$regex" >"$removed" || :
-  printf '%s\n' "$diff" | grep '^+' | grep -oE "$regex" >"$added" || :
+  # Skip the BuildKit frontend pin (`# syntax=docker/dockerfile:...`): it is a
+  # build frontend, not a runtime image worth SBOM-diffing. Any diff line that
+  # contains `syntax=` is dropped before refs are extracted.
+  printf '%s\n' "$diff" | grep '^-' | grep -v 'syntax=' | grep -oE "$regex" >"$removed" || :
+  printf '%s\n' "$diff" | grep '^+' | grep -v 'syntax=' | grep -oE "$regex" >"$added" || :
 }
+
+# image_repo_family lives in lib/shared.bash (sourced above).
 
 # Greedy two-pass match: pair by repo:tag first, then by repo only, so a digest
 # bump still matches when the tag changed in the same update. Emits "before<TAB>after".
@@ -182,6 +187,35 @@ pair_digests() {
           break
         fi
       done
+    done
+  done
+
+  # Third pass: version-normalized "family" match, so a Node major bump that
+  # renames the repository (node-22-alpine -> node-24-alpine) still pairs.
+  # Guarded: only pair when the family key is unambiguous among the leftovers
+  # (exactly one unpaired removed and one unpaired added share it), so we never
+  # collapse two genuinely different images.
+  local cnt_r cnt_a m
+  for ((i = 0; i < ${#rem[@]}; i++)); do
+    [ -z "${rem[i]}" ] && continue
+    key_r="$(image_repo_family "${rem[i]}")"
+    cnt_r=0
+    for ((m = 0; m < ${#rem[@]}; m++)); do
+      [ -n "${rem[m]}" ] && [ "$(image_repo_family "${rem[m]}")" = "$key_r" ] && cnt_r=$((cnt_r + 1))
+    done
+    cnt_a=0
+    for ((j = 0; j < ${#add[@]}; j++)); do
+      [ -n "${add[j]}" ] && [ "$(image_repo_family "${add[j]}")" = "$key_r" ] && cnt_a=$((cnt_a + 1))
+    done
+    [ "$cnt_r" -eq 1 ] && [ "$cnt_a" -eq 1 ] || continue
+    for ((j = 0; j < ${#add[@]}; j++)); do
+      [ -z "${add[j]}" ] && continue
+      if [ "$(image_repo_family "${add[j]}")" = "$key_r" ]; then
+        printf '%s\t%s\n' "${rem[i]}" "${add[j]}"
+        rem[i]=""
+        add[j]=""
+        break
+      fi
     done
   done
 }
@@ -410,4 +444,9 @@ main() {
   upsert_pr "$block" "$nchanged"
 }
 
-main "$@"
+# Allow BATS tests to source this hook without executing main(). BATS_TEST_DIRNAME
+# is set only inside a running bats test and is not exported to child processes, so
+# main() still runs both when Buildkite sources the hook and when it is executed.
+if [ -z "${BATS_TEST_DIRNAME:-}" ]; then
+  main "$@"
+fi

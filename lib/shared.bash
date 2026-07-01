@@ -49,6 +49,23 @@ image_repo() {
   printf '%s' "${prefix}${name}"
 }
 
+# image_repo_family <ref>: repository with an embedded numeric version token
+# removed, so images that encode a major version in their NAME compare equal
+# across a bump. Only an all-digits, dash-delimited fragment is stripped.
+#   .../node-22-alpine:latest@sha256:...  -> .../node-alpine
+#   .../node-22:latest@sha256:...         -> .../node
+#   registry/app-v2-service:tag@sha256:.. -> registry/app-v2-service   (unchanged)
+#   .../node-18-alpine-3.20:tag@sha256:.. -> .../node-alpine-3.20       (3.20 kept)
+image_repo_family() {
+  local repo name prefix
+  repo="$(image_repo "$1")"
+  name="${repo##*/}"           # image name (last segment)
+  prefix="${repo%/*}"          # registry[/namespace]
+  if [ "$prefix" != "$repo" ]; then prefix="${prefix}/"; else prefix=""; fi
+  name="$(printf '%s' "$name" | sed -E 's#(-[0-9]+)+(-|$)#\2#g; s#-$##')"
+  printf '%s' "${prefix}${name}"
+}
+
 # repo_slug URL -> owner/name. github.com only: strips a github.com[:/] host (https
 # or ssh), the .git suffix and a trailing slash. URLs on other hosts (e.g. GitHub
 # Enterprise) pass through unchanged, so upsert_pr's `gh --repo "$slug"` calls will
